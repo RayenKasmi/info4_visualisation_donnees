@@ -12,13 +12,14 @@
 	function scatterMatrix(data) {
 
         // Specify the chart’s dimensions.
-        const width = 928;
+        const width = 6000;
         const height = width;
         const padding = 28;
         // data.js has no data.columns (only d3.csv adds it): pick the numeric columns to compare.
         // All 19 would make 361 cells, so keep a few.
-        const columns = ["radius_mean", "texture_mean", "area_mean", "concavity_mean", "symmetry_mean"]
-            .filter(c => typeof data[0][c] === "number");
+        //const columns = ["radius_mean", "texture_mean", "area_mean", "concavity_mean", "symmetry_mean"]
+        //    .filter(c => typeof data[0][c] === "number");
+        const columns = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
         const size = (width - (columns.length + 1) * padding) / columns.length + padding;
 
         // Define the horizontal scales (one for each row).
@@ -92,7 +93,7 @@
         });
 
         const circle = cell.selectAll("circle")
-            .attr("r", 3.5)
+            .attr("r", 2.5)
             .attr("fill-opacity", 0.7)
             .attr("fill", d => color(category(d)));
 
