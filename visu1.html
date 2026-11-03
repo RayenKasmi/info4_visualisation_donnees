@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Visu</title>
+	<script type="text/javascript" src="data.js"></script>
+	<script type="text/javascript" src="d3.v7.min.js"></script>
+	<style>
+		/* Two panels side by side, filling the whole screen. */
+		body { margin: 0; height: 100vh; display: flex; font: 14px sans-serif; }
+		.panel { flex: 1; min-width: 0; margin: 8px; border: 1px solid #ccc; display: flex; flex-direction: column; }
+		.panel h3 { margin: 6px 10px; }
+		.view { flex: 1; min-height: 0; overflow: auto; }
+		label { margin-right: 16px; }
+		input { width: 70px; }
+	</style>
+</head>
+<body>
+<div class="panel">
+	<h3>Scatter matrix (molette = zoom, glisser = déplacer)</h3>
+	<div class="view" id="scatter"></div>
+</div>
+<div class="panel">
+	<h3>Histogramme</h3>
+	<div class="view" id="histogram"></div>
+</div>
+<script>
+	function scatterMatrix(data) {
+
+        // Specify the chart’s dimensions.
+        const width = 6000;
+        const height = width;
+        const padding = 28;
+        // data.js has no data.columns (only d3.csv adds it): pick the numeric columns to compare.
+        // All 19 would make 361 cells, so keep a few.
+        //const columns = ["radius_mean", "texture_mean", "area_mean", "concavity_mean", "symmetry_mean"]
+        //    .filter(c => typeof data[0][c] === "number");
+        const columns = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+        const size = (width - (columns.length + 1) * padding) / columns.length + padding;
+
+        // Define the horizontal scales (one for each row).
+        const x = columns.map(c => d3.scaleLinear()
+            .domain(d3.extent(data, d => d[c]))
+            .rangeRound([padding / 2, size - padding / 2]))
+
+        // Define the companion vertical scales (one for each column).
+        const y = x.map(x => x.copy().range([size - padding / 2, padding / 2]));
+
+        // Define the color scale (by diagnosis M/B if data.js has that column, otherwise one color).
+        const category = d => d.diagnosis ?? "all";
+        const color = d3.scaleOrdinal()
+            .domain(data.map(category))
+            .range(d3.schemeCategory10);
+
+        // Define the horizontal axis (it will be applied separately for each column).
+        const axisx = d3.axisBottom()
+            .ticks(6)
+            .tickSize(size * columns.length);
+        const xAxis = g => g.selectAll("g").data(x).join("g")
+            .attr("transform", (d, i) => `translate(${i * size},0)`)
+            .each(function(d) { return d3.select(this).call(axisx.scale(d)); })
+            .call(g => g.select(".domain").remove())
+            .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+
+        // Define the vertical axis (it will be applied separately for each row).
+        const axisy = d3.axisLeft()
+            .ticks(6)
+            .tickSize(-size * columns.length);
+        const yAxis = g => g.selectAll("g").data(y).join("g")
+            .attr("transform", (d, i) => `translate(0,${i * size})`)
+            .each(function(d) { return d3.select(this).call(axisy.scale(d)); })
+            .call(g => g.select(".domain").remove())
+            .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
+
+        // The svg fills its panel; the viewBox keeps the 6000x6000 coordinates,
+        // so the whole matrix is shrunk to fit at first.
+        const svg = d3.create("svg")
+            .attr("width", "100%")
+            .attr("height", "100%")
+            .attr("viewBox", [-padding, 0, width, height]);
+
+        svg.append("style")
+            .text("circle.hidden { fill: #000; fill-opacity: 1; r: 1px; }");
+
+        // Everything is drawn inside this group, which the zoom moves and scales.
+        const view = svg.append("g");
+
+        svg.call(d3.zoom()
+            .scaleExtent([1, 20])
+            .on("zoom", event => view.attr("transform", event.transform)));
+
+        view.append("g")
+            .call(xAxis);
+
+        view.append("g")
+            .call(yAxis);
+
+        const cell = view.append("g")
+            .selectAll("g")
+            .data(d3.cross(d3.range(columns.length), d3.range(columns.length)))
+            .join("g")
+            .attr("transform", ([i, j]) => `translate(${i * size},${j * size})`);
+
+        cell.append("rect")
+            .attr("fill", "none")
+            .attr("stroke", "#aaa")
+            .attr("x", padding / 2 + 0.5)
+            .attr("y", padding / 2 + 0.5)
+            .attr("width", size - padding)
+            .attr("height", size - padding);
+
+        cell.each(function([i, j]) {
+            d3.select(this).selectAll("circle")
+            .data(data.filter(d => !isNaN(d[columns[i]]) && !isNaN(d[columns[j]])))
+            .join("circle")
+                .attr("cx", d => x[i](d[columns[i]]))
+                .attr("cy", d => y[j](d[columns[j]]));
+        });
+
+        const circle = cell.selectAll("circle")
+            .attr("r", 2.5)
+            .attr("fill-opacity", 0.7)
+            .attr("fill", d => color(category(d)));
+
+        view.append("g")
+            .style("font", "bold 10px sans-serif")
+            .style("pointer-events", "none")
+            .selectAll("text")
+            .data(columns)
+            .join("text")
+            .attr("transform", (d, i) => `translate(${i * size},${i * size})`)
+            .attr("x", padding)
+            .attr("y", padding)
+            .attr("dy", ".71em")
+            .text(d => d);
+
+        return Object.assign(svg.node(), {scales: {color}});
+    }
+
+    function histogram(data) {
+        const width = 600;
+        const height = 450;
+        const margin = {top: 20, right: 30, bottom: 40, left: 50};
+
+        // Numeric columns of data.js are the dimensions the user can pick.
+        const columns = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+
+        // Controls + svg are built in a div that the function returns (like scatterMatrix returns its svg).
+        const root = d3.create("div");
+        const controls = root.append("div");
+
+        const select = controls.append("label").text("Dimension : ").append("select");
+        select.selectAll("option").data(columns).join("option")
+            .attr("value", d => d)
+            .text(d => d);
+
+        const binsInput = controls.append("label").text("Nombre de bins : ").append("input")
+            .attr("type", "number").attr("min", 1).attr("value", 7);
+
+        const sigmaInput = controls.append("label").text("Largeur gaussienne (px) : ").append("input")
+            .attr("type", "number").attr("min", 1).attr("value", 10);
+
+        // viewBox + width 100%: the chart scales to the width of its panel.
+        const svg = root.append("svg")
+            .attr("viewBox", [0, 0, width, height])
+            .style("width", "100%");
+
+        // A. Manual histogram: n bins of equal width between min and max.
+        // Bin i covers [min + i*step, min + (i+1)*step[, the last one is closed: [.., max].
+        function buildBins(values, n) {
+            const min = d3.min(values);
+            const max = d3.max(values);
+            const step = (max - min) / n;
+            const bins = d3.range(n).map(i => ({x0: min + i * step, x1: min + (i + 1) * step, count: 0}));
+            for (const v of values) {
+                let i = step === 0 ? 0 : Math.floor((v - min) / step);
+                if (i >= n) i = n - 1; // v == max goes into the last bin
+                bins[i].count++;
+            }
+            return bins;
+        }
+
+        // B. Sum of one gaussian per sample, evaluated at point t.
+        function gaussianSum(values, t, sigma) {
+            let sum = 0;
+            for (const v of values) {
+                sum += Math.exp(-((t - v) ** 2) / (2 * sigma * sigma));
+            }
+            return sum;
+        }
+
+        function draw() {
+            const dim = select.property("value");
+            const n = Math.max(1, +binsInput.property("value") || 1);
+            const sigmaPx = Math.max(1, +sigmaInput.property("value") || 1);
+
+            const values = data.map(d => d[dim]).filter(v => typeof v === "number" && !isNaN(v));
+            const bins = buildBins(values, n);
+            const maxCount = d3.max(bins, b => b.count);
+
+            const x = d3.scaleLinear()
+                .domain([bins[0].x0, bins[n - 1].x1])
+                .range([margin.left, width - margin.right]);
+
+            // Max height of the histogram = its tallest bar.
+            const y = d3.scaleLinear()
+                .domain([0, maxCount])
+                .range([height - margin.bottom, margin.top]);
+
+            svg.selectAll("*").remove();
+
+            svg.append("g")
+                .selectAll("rect")
+                .data(bins)
+                .join("rect")
+                .attr("x", b => x(b.x0) + 1)
+                .attr("width", b => Math.max(0, x(b.x1) - x(b.x0) - 1))
+                .attr("y", b => y(b.count))
+                .attr("height", b => y(0) - y(b.count))
+                .attr("fill", "steelblue");
+
+            svg.append("g")
+                .attr("transform", `translate(0,${height - margin.bottom})`)
+                .call(d3.axisBottom(x));
+
+            svg.append("g")
+                .attr("transform", `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y));
+
+            svg.append("text")
+                .attr("x", width / 2)
+                .attr("y", height - 5)
+                .attr("text-anchor", "middle")
+                .text(dim);
+
+            // C. Sample the horizontal axis every 2 pixels.
+            // The gaussian width is given in pixels, converted to data units.
+            const sigma = sigmaPx * (x.domain()[1] - x.domain()[0]) / (x.range()[1] - x.range()[0]);
+            const points = [];
+            for (let px = x.range()[0]; px <= x.range()[1]; px += 2) {
+                const t = x.invert(px);
+                points.push([px, gaussianSum(values, t, sigma)]);
+            }
+
+            // Scale the curve so its max equals the tallest bar.
+            const curveMax = d3.max(points, p => p[1]);
+            const line = d3.line()
+                .x(p => p[0])
+                .y(p => y(p[1] / curveMax * maxCount))
+                .curve(d3.curveBasis); // Bezier smoothing
+
+            svg.append("path")
+                .datum(points)
+                .attr("fill", "none")
+                .attr("stroke", "crimson")
+                .attr("stroke-width", 2)
+                .attr("d", line);
+        }
+
+        // Redraw whenever one of the three inputs changes.
+        select.on("input", draw);
+        binsInput.on("input", draw);
+        sigmaInput.on("input", draw);
+        draw();
+
+        return root.node();
+    }
+
+    // Observable displays the returned node automatically; in plain HTML we add it to the page ourselves.
+    // Random sample: copy (slice) so the original data isn't reordered, shuffle, keep the first N.
+    // `data` is a const from data.js, so the sample goes in a new variable.
+    const sampleSize = 300;
+    const sample = d3.shuffle(data.slice()).slice(0, sampleSize);
+    document.getElementById("scatter").appendChild(scatterMatrix(sample));
+
+    // The histogram uses all the data, not the sample.
+    document.getElementById("histogram").appendChild(histogram(data));
+</script>
+
+</body>
+</html>
