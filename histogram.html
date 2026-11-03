@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Histogramme</title>
+	<script type="text/javascript" src="data.js"></script>
+	<script type="text/javascript" src="d3.v7.min.js"></script>
+	<style>
+		body { font: 14px sans-serif; }
+		label { margin-right: 16px; }
+		input { width: 70px; }
+	</style>
+</head>
+<body>
+<div id="controls">
+	<label>Dimension : <select id="dimension"></select></label>
+	<label>Nombre de bins : <input id="bins" type="number" min="1" value="7"></label>
+	<label>Largeur gaussienne (px) : <input id="sigma" type="number" min="1" value="10"></label>
+</div>
+<div id="container"></div>
+<script>
+    const width = 1100;
+    const height = 800;
+    const margin = {top: 20, right: 30, bottom: 40, left: 50};
+
+    // Numeric columns of data.js are the dimensions the user can pick.
+    const columns = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+
+    const select = d3.select("#dimension");
+    select.selectAll("option").data(columns).join("option")
+        .attr("value", d => d)
+        .text(d => d);
+
+    const svg = d3.select("#container").append("svg")
+        .attr("width", width)
+        .attr("height", height);
+
+    // A. Manual histogram: n bins of equal width between min and max.
+    // Bin i covers [min + i*step, min + (i+1)*step[, the last one is closed: [.., max].
+    function buildBins(values, n) {
+        const min = d3.min(values);
+        const max = d3.max(values);
+        const step = (max - min) / n;
+        const bins = d3.range(n).map(i => ({x0: min + i * step, x1: min + (i + 1) * step, count: 0}));
+        for (const v of values) {
+            let i = step === 0 ? 0 : Math.floor((v - min) / step); 
+            if (i >= n) i = n - 1; // v == max goes into the last bin
+            bins[i].count++;
+        }
+        return bins;
+    }
+
+    // B. Sum of one gaussian per sample, evaluated at point t.
+    function gaussianSum(values, t, sigma) {
+        let sum = 0;
+        for (const v of values) {
+            sum += Math.exp(-((t - v) ** 2) / (2 * sigma * sigma));
+        }
+        return sum;
+    }
+
+    function draw() {
+        const dim = select.property("value");
+        const n = Math.max(1, +d3.select("#bins").property("value") || 1);
+        const sigmaPx = Math.max(1, +d3.select("#sigma").property("value") || 1);
+
+        const values = data.map(d => d[dim]).filter(v => typeof v === "number" && !isNaN(v));
+        const bins = buildBins(values, n);
+        const maxCount = d3.max(bins, b => b.count);
+
+        const x = d3.scaleLinear()
+            .domain([bins[0].x0, bins[n - 1].x1])
+            .range([margin.left, width - margin.right]);
+
+        // Max height of the histogram = its tallest bar.
+        const y = d3.scaleLinear()
+            .domain([0, maxCount])
+            .range([height - margin.bottom, margin.top]);
+
+        svg.selectAll("*").remove();
+
+        svg.append("g")
+            .selectAll("rect")
+            .data(bins)
+            .join("rect")
+            .attr("x", b => x(b.x0) + 1)
+            .attr("width", b => Math.max(0, x(b.x1) - x(b.x0) - 1))
+            .attr("y", b => y(b.count))
+            .attr("height", b => y(0) - y(b.count))
+            .attr("fill", "steelblue");
+
+        svg.append("g")
+            .attr("transform", `translate(0,${height - margin.bottom})`)
+            .call(d3.axisBottom(x));
+
+        svg.append("g")
+            .attr("transform", `translate(${margin.left},0)`)
+            .call(d3.axisLeft(y));
+
+        svg.append("text")
+            .attr("x", width / 2)
+            .attr("y", height - 5)
+            .attr("text-anchor", "middle")
+            .text(dim);
+
+        // C. Sample the horizontal axis every 2 pixels.
+        // The gaussian width is given in pixels, converted to data units.
+        const sigma = sigmaPx * (x.domain()[1] - x.domain()[0]) / (x.range()[1] - x.range()[0]);
+        const points = [];
+        for (let px = x.range()[0]; px <= x.range()[1]; px += 2) {
+            const t = x.invert(px);
+            points.push([px, gaussianSum(values, t, sigma)]);
+        }
+
+        // Scale the curve so its max equals the tallest bar.
+        const curveMax = d3.max(points, p => p[1]);
+        const line = d3.line()
+            .x(p => p[0])
+            .y(p => y(p[1] / curveMax * maxCount))
+            .curve(d3.curveBasis); // Bezier smoothing
+
+        svg.append("path")
+            .datum(points)
+            .attr("fill", "none")
+            .attr("stroke", "crimson")
+            .attr("stroke-width", 2)
+            .attr("d", line);
+    }
+
+    // Redraw whenever one of the three inputs changes.
+    d3.selectAll("#dimension, #bins, #sigma").on("input", draw);
+    draw();
+</script>
+</body>
+</html>
