@@ -8,6 +8,13 @@
 <body>
 <div id="container"></div>
 <div id="len"></div>
+<div id="chart"></div>
+<div id="controls">
+	<label>Dimension : <select id="dimension"></select></label>
+	<label>Nombre de bins : <input id="bins" type="number" min="1" value="7"></label>
+	<label>Largeur gaussienne (px) : <input id="sigma" type="number" min="1" value="10"></label>
+</div>
+<div id="histo-container"></div>
 <script>
 	function scatterMatrix(data) {
 
@@ -110,6 +117,95 @@
             .text(d => d);
 
         return Object.assign(svg.node(), {scales: {color}});
+    }
+
+    // Ici commence le code pour la visualisation en parallel coordinates
+
+    const margin = { top: 120, right: 40, bottom: 20, left: 40 };
+    const width  = 1600 - margin.left - margin.right;   // large : 19 axes
+    const height = 500  - margin.top  - margin.bottom;
+
+    const svg = d3.select("#chart").append("svg")
+        .attr("width",  width  + margin.left + margin.right)
+        .attr("height", height + margin.top  + margin.bottom)
+    .append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // 1. Toutes les clés sont des dimensions
+    const dimensions = Object.keys(data[0]);
+
+    // 2. Une échelle linéaire par dimension (domaine = min/max de la colonne)
+    const y = {};
+    for (const dim of dimensions) {
+    y[dim] = d3.scaleLinear()
+        .domain(d3.extent(data, d => d[dim]))
+        .range([height, 0]);
+    }
+
+    // 3. Position horizontale des axes
+    const x = d3.scalePoint().domain(dimensions).range([0, width]);
+
+    // 4. Couleur selon une dimension (modifie ici pour en choisir une autre)
+    const dimCouleur = "radius_mean";
+    const color = d3.scaleSequential(d3.interpolateViridis)
+    .domain(d3.extent(data, d => d[dimCouleur]));
+
+    // 5. Un objet -> une polyligne
+    const path = d => d3.line()(dimensions.map(dim => [x(dim), y[dim](d[dim])]));
+
+    // 6. Lignes
+    const lignes = svg.append("g").attr("class", "lignes")
+    .selectAll("path")
+    .data(data)
+    .join("path")
+        .attr("d", path)
+        .attr("fill", "none")
+        .attr("stroke", d => color(d[dimCouleur]))
+        .attr("stroke-width", 1)
+        .attr("opacity", 0.5);
+
+    // 7. Axes + titres (inclinés pour que 19 noms tiennent)
+    const axes = svg.selectAll(".axe")
+    .data(dimensions)
+    .join("g")
+        .attr("class", "axe")
+        .attr("transform", dim => `translate(${x(dim)},0)`)
+        .each(function (dim) {
+        d3.select(this).call(d3.axisLeft(y[dim]).ticks(5));
+        });
+
+    axes.append("text")
+    .attr("class", "titre-axe")
+    .attr("transform", "translate(0,-10) rotate(-45)")
+    .attr("text-anchor", "start")
+    .attr("fill", "currentColor")
+    .text(dim => dim);
+
+    // 8. Brushing : sélectionner une plage sur un ou plusieurs axes
+    const selections = new Map();   // dimension -> [min, max] en valeurs de données
+
+    axes.append("g").each(function (dim) {
+    d3.select(this).call(
+        d3.brushY()
+        .extent([[-10, 0], [10, height]])
+        .on("brush end", ({ selection }) => {
+            if (selection) {
+            // pixels -> valeurs (y est inversé, donc on inverse l'ordre)
+            const [haut, bas] = selection;
+            selections.set(dim, [y[dim].invert(bas), y[dim].invert(haut)]);
+            } else {
+            selections.delete(dim);
+            }
+            mettreAJourLignes();
+        })
+    );
+    });
+
+    function mettreAJourLignes() {
+    lignes.attr("opacity", d => {
+        const actif = [...selections].every(([dim, [min, max]]) => d[dim] >= min && d[dim] <= max);
+        return actif ? 0.7 : 0.03;
+    });
     }
 
     // Observable displays the returned node automatically; in plain HTML we add it to the page ourselves.
