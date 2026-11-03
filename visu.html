@@ -5,13 +5,18 @@
 	<script type="text/javascript" src="data.js"></script>
 	<script type="text/javascript" src="d3.v7.min.js"></script>
 	<style>
-		/* Two panels side by side, filling the whole screen. */
-		body { margin: 0; height: 100vh; display: flex; font: 14px sans-serif; }
-		.panel { flex: 1; min-width: 0; margin: 8px; border: 1px solid #ccc; display: flex; flex-direction: column; }
+		/* 2x2 grid filling the whole screen: scatter + histogram on top,
+		   parallel coordinates on the whole bottom row. */
+		body { margin: 0; height: 100vh; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+		       gap: 8px; padding: 8px; box-sizing: border-box; font: 14px sans-serif; }
+		.panel { min-width: 0; min-height: 0; border: 1px solid #ccc; display: flex; flex-direction: column; }
 		.panel h3 { margin: 6px 10px; }
 		.view { flex: 1; min-height: 0; overflow: auto; }
+		.wide { grid-column: 1 / 3; }
 		label { margin-right: 16px; }
 		input { width: 70px; }
+		.axe text { font-size: 10px; }
+		.titre-axe { font-size: 11px; font-weight: bold; }
 	</style>
 </head>
 <body>
@@ -22,6 +27,10 @@
 <div class="panel">
 	<h3>Histogramme</h3>
 	<div class="view" id="histogram"></div>
+</div>
+<div class="panel wide">
+	<h3>Coordonnées parallèles (glisser sur un axe = filtrer)</h3>
+	<div class="view" id="parallel"></div>
 </div>
 <script>
 	function scatterMatrix(data) {
@@ -145,7 +154,11 @@
         const columns = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
 
         // Controls + svg are built in a div that the function returns (like scatterMatrix returns its svg).
-        const root = d3.create("div");
+        // root is a column: controls on top, the chart takes the remaining height.
+        const root = d3.create("div")
+            .style("height", "100%")
+            .style("display", "flex")
+            .style("flex-direction", "column");
         const controls = root.append("div");
 
         const select = controls.append("label").text("Dimension : ").append("select");
@@ -159,10 +172,15 @@
         const sigmaInput = controls.append("label").text("Largeur gaussienne (px) : ").append("input")
             .attr("type", "number").attr("min", 1).attr("value", 10);
 
-        // viewBox + width 100%: the chart scales to the width of its panel.
-        const svg = root.append("svg")
+        // viewBox + 100% width/height: the chart shrinks to fit the space under the controls
+        // (it keeps its proportions, so it may leave some blank space on the sides).
+        const svg = root.append("div")
+            .style("flex", "1")
+            .style("min-height", "0")
+            .append("svg")
             .attr("viewBox", [0, 0, width, height])
-            .style("width", "100%");
+            .attr("width", "100%")
+            .attr("height", "100%");
 
         // A. Manual histogram: n bins of equal width between min and max.
         // Bin i covers [min + i*step, min + (i+1)*step[, the last one is closed: [.., max].
@@ -265,6 +283,100 @@
         return root.node();
     }
 
+    function parallelCoordinates(data) {
+        const margin = { top: 120, right: 40, bottom: 20, left: 40 };
+        const width  = 1600 - margin.left - margin.right;   // large : 19 axes
+        const height = 500  - margin.top  - margin.bottom;
+
+        // viewBox + 100% : le graphique est réduit pour tenir dans son panneau.
+        const svg = d3.create("svg")
+            .attr("viewBox", [0, 0, width + margin.left + margin.right, height + margin.top + margin.bottom])
+            .attr("width", "100%")
+            .attr("height", "100%");
+
+        const g = svg.append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // 1. Toutes les colonnes numériques sont des dimensions
+        const dimensions = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+
+        // 2. Une échelle linéaire par dimension (domaine = min/max de la colonne)
+        const y = {};
+        for (const dim of dimensions) {
+            y[dim] = d3.scaleLinear()
+                .domain(d3.extent(data, d => d[dim]))
+                .range([height, 0]);
+        }
+
+        // 3. Position horizontale des axes
+        const x = d3.scalePoint().domain(dimensions).range([0, width]);
+
+        // 4. Couleur selon une dimension (modifie ici pour en choisir une autre)
+        const dimCouleur = "radius_mean";
+        const color = d3.scaleSequential(d3.interpolateViridis)
+            .domain(d3.extent(data, d => d[dimCouleur]));
+
+        // 5. Un objet -> une polyligne
+        const path = d => d3.line()(dimensions.map(dim => [x(dim), y[dim](d[dim])]));
+
+        // 6. Lignes
+        const lignes = g.append("g").attr("class", "lignes")
+            .selectAll("path")
+            .data(data)
+            .join("path")
+            .attr("d", path)
+            .attr("fill", "none")
+            .attr("stroke", d => color(d[dimCouleur]))
+            .attr("stroke-width", 1)
+            .attr("opacity", 0.5);
+
+        // 7. Axes + titres (inclinés pour que 19 noms tiennent)
+        const axes = g.selectAll(".axe")
+            .data(dimensions)
+            .join("g")
+            .attr("class", "axe")
+            .attr("transform", dim => `translate(${x(dim)},0)`)
+            .each(function (dim) {
+                d3.select(this).call(d3.axisLeft(y[dim]).ticks(5));
+            });
+
+        axes.append("text")
+            .attr("class", "titre-axe")
+            .attr("transform", "translate(0,-10) rotate(-45)")
+            .attr("text-anchor", "start")
+            .attr("fill", "currentColor")
+            .text(dim => dim);
+
+        // 8. Brushing : sélectionner une plage sur un ou plusieurs axes
+        const selections = new Map();   // dimension -> [min, max] en valeurs de données
+
+        axes.append("g").each(function (dim) {
+            d3.select(this).call(
+                d3.brushY()
+                    .extent([[-10, 0], [10, height]])
+                    .on("brush end", ({ selection }) => {
+                        if (selection) {
+                            // pixels -> valeurs (y est inversé, donc on inverse l'ordre)
+                            const [haut, bas] = selection;
+                            selections.set(dim, [y[dim].invert(bas), y[dim].invert(haut)]);
+                        } else {
+                            selections.delete(dim);
+                        }
+                        mettreAJourLignes();
+                    })
+            );
+        });
+
+        function mettreAJourLignes() {
+            lignes.attr("opacity", d => {
+                const actif = [...selections].every(([dim, [min, max]]) => d[dim] >= min && d[dim] <= max);
+                return actif ? 0.7 : 0.03;
+            });
+        }
+
+        return svg.node();
+    }
+
     // Observable displays the returned node automatically; in plain HTML we add it to the page ourselves.
     // Random sample: copy (slice) so the original data isn't reordered, shuffle, keep the first N.
     // `data` is a const from data.js, so the sample goes in a new variable.
@@ -274,6 +386,9 @@
 
     // The histogram uses all the data, not the sample.
     document.getElementById("histogram").appendChild(histogram(data));
+
+    // Parallel coordinates also use all the data.
+    document.getElementById("parallel").appendChild(parallelCoordinates(data));
 </script>
 
 </body>
