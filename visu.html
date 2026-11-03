@@ -1,66 +1,111 @@
 <!DOCTYPE html>
 <html>
 <head>
+	<meta charset="utf-8">
 	<title>Visu</title>
 	<script type="text/javascript" src="data.js"></script>
 	<script type="text/javascript" src="d3.v7.min.js"></script>
 	<style>
-		/* 2x2 grid filling the whole screen: scatter + histogram on top,
-		   parallel coordinates on the whole bottom row. */
-		body { margin: 0; height: 100vh; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+		/* Grille : une ligne d'info, puis scatter + histogramme, puis coordonnées parallèles sur toute la largeur. */
+		body { margin: 0; height: 100vh; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr 1fr;
 		       gap: 8px; padding: 8px; box-sizing: border-box; font: 14px sans-serif; }
 		.panel { min-width: 0; min-height: 0; border: 1px solid #ccc; display: flex; flex-direction: column; }
 		.panel h3 { margin: 6px 10px; }
 		.view { flex: 1; min-height: 0; overflow: auto; }
 		.wide { grid-column: 1 / 3; }
+		#info { min-height: 1.4em; }
 		label { margin-right: 16px; }
 		input { width: 70px; }
 		.axe text { font-size: 10px; }
 		.titre-axe { font-size: 11px; font-weight: bold; }
+
+		/* États des points du scatter (ces règles CSS l'emportent sur l'attribut fill posé en JS) */
+		.dot { cursor: pointer; }
+		.dot.sel { fill: #e4572e; fill-opacity: 1; }
+		.dot.dim { fill: #bbb; fill-opacity: 0.25; }
+		/* Lignes des coordonnées parallèles */
+		.ligne { cursor: pointer; }
 	</style>
 </head>
 <body>
+<div id="info" class="wide">Aucune sélection</div>
 <div class="panel">
-	<h3>Scatter matrix (molette = zoom, glisser = déplacer)</h3>
+	<h3>Scatter matrix (glisser = sélectionner, molette = zoom, Maj + glisser = déplacer)</h3>
 	<div class="view" id="scatter"></div>
 </div>
 <div class="panel">
-	<h3>Histogramme</h3>
+	<h3>Histogramme (glisser = sélectionner)</h3>
 	<div class="view" id="histogram"></div>
 </div>
 <div class="panel wide">
-	<h3>Coordonnées parallèles (glisser sur un axe = filtrer)</h3>
+	<h3>Coordonnées parallèles (glisser sur un axe = filtrer, clic sur une ligne = un individu, clic dans le vide = effacer)</h3>
 	<div class="view" id="parallel"></div>
 </div>
 <script>
-	function scatterMatrix(data) {
+	// =====================================================================
+	// État partagé entre les vues
+	// =====================================================================
+	const SEL_COLOR = "#e4572e";   // couleur de mise en évidence, la même dans toutes les vues
 
-        // Specify the chart’s dimensions.
+	// Colonnes numériques, calculées AVANT d'ajouter l'identifiant (sinon "id" deviendrait une dimension).
+	const NUM_COLUMNS = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+
+	// Un identifiant stable par individu : toutes les vues parlent du même individu via d.id.
+	// (data est une const, mais on peut modifier ses objets.)
+	data.forEach((d, i) => d.id = i);
+
+	let selected = new Set();
+	const views = [];
+	let updatePending = false;
+
+	// ids : individus sélectionnés ; source : la vue qui a produit la sélection (ou null).
+	// Seule la vue source garde son rectangle de brush, les autres l'effacent.
+	function setSelection(ids, source) {
+		selected = new Set(ids);
+		views.forEach(v => { if (v !== source) v.clearBrush(); });
+		// Les mises à jour sont regroupées (au plus une par image) : le scatter matrix a ~100 000 points.
+		if (!updatePending) {
+			updatePending = true;
+			requestAnimationFrame(() => {
+				updatePending = false;
+				views.forEach(v => v.update(selected));
+				showInfo();
+			});
+		}
+	}
+
+	function showInfo() {
+		const info = d3.select("#info");
+		if (selected.size === 0) return info.text("Aucune sélection");
+		if (selected.size === 1) {
+			const d = data[[...selected][0]];   // id = indice dans data
+			return info.text(`Individu #${d.id} : radius_mean=${d.radius_mean}, texture_mean=${d.texture_mean}, area_mean=${d.area_mean}`);
+		}
+		info.text(`${selected.size} individus sélectionnés`);
+	}
+
+	// =====================================================================
+	// Scatter matrix
+	// =====================================================================
+	function scatterMatrix(data) {   // `data` = l'échantillon
+
         const width = 6000;
         const height = width;
         const padding = 28;
-        // data.js has no data.columns (only d3.csv adds it): pick the numeric columns to compare.
-        // All 19 would make 361 cells, so keep a few.
-        //const columns = ["radius_mean", "texture_mean", "area_mean", "concavity_mean", "symmetry_mean"]
-        //    .filter(c => typeof data[0][c] === "number");
-        const columns = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+        const columns = NUM_COLUMNS;
         const size = (width - (columns.length + 1) * padding) / columns.length + padding;
 
-        // Define the horizontal scales (one for each row).
         const x = columns.map(c => d3.scaleLinear()
             .domain(d3.extent(data, d => d[c]))
             .rangeRound([padding / 2, size - padding / 2]))
 
-        // Define the companion vertical scales (one for each column).
         const y = x.map(x => x.copy().range([size - padding / 2, padding / 2]));
 
-        // Define the color scale (by diagnosis M/B if data.js has that column, otherwise one color).
         const category = d => d.diagnosis ?? "all";
         const color = d3.scaleOrdinal()
             .domain(data.map(category))
             .range(d3.schemeCategory10);
 
-        // Define the horizontal axis (it will be applied separately for each column).
         const axisx = d3.axisBottom()
             .ticks(6)
             .tickSize(size * columns.length);
@@ -70,7 +115,6 @@
             .call(g => g.select(".domain").remove())
             .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
 
-        // Define the vertical axis (it will be applied separately for each row).
         const axisy = d3.axisLeft()
             .ticks(6)
             .tickSize(-size * columns.length);
@@ -80,21 +124,18 @@
             .call(g => g.select(".domain").remove())
             .call(g => g.selectAll(".tick line").attr("stroke", "#ddd"));
 
-        // The svg fills its panel; the viewBox keeps the 6000x6000 coordinates,
-        // so the whole matrix is shrunk to fit at first.
         const svg = d3.create("svg")
             .attr("width", "100%")
             .attr("height", "100%")
             .attr("viewBox", [-padding, 0, width, height]);
 
-        svg.append("style")
-            .text("circle.hidden { fill: #000; fill-opacity: 1; r: 1px; }");
-
-        // Everything is drawn inside this group, which the zoom moves and scales.
         const view = svg.append("g");
 
+        // Zoom : molette, ou Maj + glisser pour déplacer.
+        // Le glisser simple est réservé au brush (sinon zoom et brush se disputent la souris).
         svg.call(d3.zoom()
             .scaleExtent([1, 20])
+            .filter(event => !event.button && (event.type === "wheel" || event.shiftKey))
             .on("zoom", event => view.attr("transform", event.transform)));
 
         view.append("g")
@@ -117,6 +158,34 @@
             .attr("width", size - padding)
             .attr("height", size - padding);
 
+        // ---- Brush : un par cellule, un seul actif à la fois ----
+        const sv = {};              // l'objet "vue" enregistré dans views
+        let activeCell = null;      // cellule contenant le rectangle de brush actuel
+
+        const brush = d3.brush()
+            .extent([[padding / 2, padding / 2], [size - padding / 2, size - padding / 2]])
+            .filter(event => !event.shiftKey && !event.ctrlKey && !event.button)   // Maj = déplacement (zoom)
+            .on("start", function(event) {
+                if (!event.sourceEvent) return;   // déclenché par brush.move(), on ignore
+                if (activeCell && activeCell !== this) {
+                    d3.select(activeCell).call(brush.move, null);   // efface le brush de l'ancienne cellule
+                }
+                activeCell = this;
+            })
+            .on("brush end", function(event, [i, j]) {
+                if (!event.sourceEvent) return;
+                if (!event.selection) return setSelection([], sv);
+                const [[x0, y0], [x1, y1]] = event.selection;
+                const ids = data.filter(d => {
+                    const px = x[i](d[columns[i]]), py = y[j](d[columns[j]]);
+                    return x0 <= px && px <= x1 && y0 <= py && py <= y1;
+                }).map(d => d.id);
+                setSelection(ids, sv);
+            });
+
+        // Le brush d'abord, les points ensuite : les points restent cliquables au-dessus de l'overlay.
+        cell.call(brush);
+
         cell.each(function([i, j]) {
             d3.select(this).selectAll("circle")
             .data(data.filter(d => !isNaN(d[columns[i]]) && !isNaN(d[columns[j]])))
@@ -126,9 +195,11 @@
         });
 
         const circle = cell.selectAll("circle")
+            .attr("class", "dot")
             .attr("r", 2.5)
             .attr("fill-opacity", 0.7)
-            .attr("fill", d => color(category(d)));
+            .attr("fill", d => color(category(d)))
+            .on("click", (event, d) => setSelection([d.id], null));
 
         view.append("g")
             .style("font", "bold 10px sans-serif")
@@ -142,19 +213,32 @@
             .attr("dy", ".71em")
             .text(d => d);
 
+        sv.update = sel => {
+            circle.attr("class", d => sel.size === 0 ? "dot" : sel.has(d.id) ? "dot sel" : "dot dim");
+            // Remonter les points sélectionnés au premier plan, seulement pour une petite sélection (coûteux sinon)
+            if (sel.size > 0 && sel.size <= 20) circle.filter(d => sel.has(d.id)).raise();
+        };
+        sv.clearBrush = () => {
+            if (activeCell) {
+                d3.select(activeCell).call(brush.move, null);
+                activeCell = null;
+            }
+        };
+        views.push(sv);
+
         return Object.assign(svg.node(), {scales: {color}});
     }
 
+	// =====================================================================
+	// Histogramme + densité
+	// =====================================================================
     function histogram(data) {
         const width = 600;
         const height = 450;
         const margin = {top: 20, right: 30, bottom: 40, left: 50};
 
-        // Numeric columns of data.js are the dimensions the user can pick.
-        const columns = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+        const columns = NUM_COLUMNS;
 
-        // Controls + svg are built in a div that the function returns (like scatterMatrix returns its svg).
-        // root is a column: controls on top, the chart takes the remaining height.
         const root = d3.create("div")
             .style("height", "100%")
             .style("display", "flex")
@@ -172,8 +256,6 @@
         const sigmaInput = controls.append("label").text("Largeur gaussienne (px) : ").append("input")
             .attr("type", "number").attr("min", 1).attr("value", 10);
 
-        // viewBox + 100% width/height: the chart shrinks to fit the space under the controls
-        // (it keeps its proportions, so it may leave some blank space on the sides).
         const svg = root.append("div")
             .style("flex", "1")
             .style("min-height", "0")
@@ -182,8 +264,10 @@
             .attr("width", "100%")
             .attr("height", "100%");
 
-        // A. Manual histogram: n bins of equal width between min and max.
-        // Bin i covers [min + i*step, min + (i+1)*step[, the last one is closed: [.., max].
+        const view = {};
+        let current = null;    // ce que le dernier draw() a calculé : update() le réutilise
+        let brush = null, brushG = null;
+
         function buildBins(values, n) {
             const min = d3.min(values);
             const max = d3.max(values);
@@ -191,13 +275,12 @@
             const bins = d3.range(n).map(i => ({x0: min + i * step, x1: min + (i + 1) * step, count: 0}));
             for (const v of values) {
                 let i = step === 0 ? 0 : Math.floor((v - min) / step);
-                if (i >= n) i = n - 1; // v == max goes into the last bin
+                if (i >= n) i = n - 1;
                 bins[i].count++;
             }
             return bins;
         }
 
-        // B. Sum of one gaussian per sample, evaluated at point t.
         function gaussianSum(values, t, sigma) {
             let sum = 0;
             for (const v of values) {
@@ -211,7 +294,9 @@
             const n = Math.max(1, +binsInput.property("value") || 1);
             const sigmaPx = Math.max(1, +sigmaInput.property("value") || 1);
 
-            const values = data.map(d => d[dim]).filter(v => typeof v === "number" && !isNaN(v));
+            // On garde les individus (pas seulement les valeurs) pour connaître leur id
+            const items = data.filter(d => typeof d[dim] === "number" && !isNaN(d[dim]));
+            const values = items.map(d => d[dim]);
             const bins = buildBins(values, n);
             const maxCount = d3.max(bins, b => b.count);
 
@@ -219,13 +304,13 @@
                 .domain([bins[0].x0, bins[n - 1].x1])
                 .range([margin.left, width - margin.right]);
 
-            // Max height of the histogram = its tallest bar.
             const y = d3.scaleLinear()
                 .domain([0, maxCount])
                 .range([height - margin.bottom, margin.top]);
 
             svg.selectAll("*").remove();
 
+            // Couche 1 : tous les individus
             svg.append("g")
                 .selectAll("rect")
                 .data(bins)
@@ -250,31 +335,84 @@
                 .attr("text-anchor", "middle")
                 .text(dim);
 
-            // C. Sample the horizontal axis every 2 pixels.
-            // The gaussian width is given in pixels, converted to data units.
+            // Densité de tous les individus
             const sigma = sigmaPx * (x.domain()[1] - x.domain()[0]) / (x.range()[1] - x.range()[0]);
-            const points = [];
-            for (let px = x.range()[0]; px <= x.range()[1]; px += 2) {
-                const t = x.invert(px);
-                points.push([px, gaussianSum(values, t, sigma)]);
-            }
+            const pxs = d3.range(x.range()[0], x.range()[1] + 1, 2);
+            const points = pxs.map(px => [px, gaussianSum(values, x.invert(px), sigma)]);
 
-            // Scale the curve so its max equals the tallest bar.
             const curveMax = d3.max(points, p => p[1]);
             const line = d3.line()
                 .x(p => p[0])
                 .y(p => y(p[1] / curveMax * maxCount))
-                .curve(d3.curveBasis); // Bezier smoothing
+                .curve(d3.curveBasis);
 
             svg.append("path")
                 .datum(points)
                 .attr("fill", "none")
-                .attr("stroke", "crimson")
+                .attr("stroke", "#444")      // gris foncé : le rouge/orange est réservé à la sélection
                 .attr("stroke-width", 2)
                 .attr("d", line);
+
+            // Couche 2 : individus sélectionnés (barres + densité), remplie par view.update()
+            const overlay = svg.append("g").style("pointer-events", "none");
+
+            // Brush 1D par-dessus tout
+            brush = d3.brushX()
+                .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]])
+                .on("brush end", ({selection, sourceEvent}) => {
+                    if (!sourceEvent) return;
+                    if (!selection) return setSelection([], view);
+                    const [v0, v1] = selection.map(x.invert);   // pixels -> valeurs
+                    setSelection(items.filter(d => v0 <= d[dim] && d[dim] <= v1).map(d => d.id), view);
+                });
+            brushG = svg.append("g").call(brush);
+
+            current = {dim, items, x, y, bins, n, sigma, pxs, line, overlay};
+            view.update(selected);
         }
 
-        // Redraw whenever one of the three inputs changes.
+        view.update = sel => {
+            if (!current) return;
+            const {dim, items, x, y, bins, n, sigma, pxs, line, overlay} = current;
+            overlay.selectAll("*").remove();
+
+            const chosen = items.filter(d => sel.has(d.id));
+            if (chosen.length === 0) return;
+
+            // Nombre d'individus sélectionnés dans chaque bin (même règle de découpage que buildBins)
+            const min = bins[0].x0, step = bins[0].x1 - bins[0].x0;
+            const counts = new Array(n).fill(0);
+            for (const d of chosen) {
+                let i = step === 0 ? 0 : Math.floor((d[dim] - min) / step);
+                if (i >= n) i = n - 1;
+                counts[i]++;
+            }
+
+            overlay.append("g")
+                .selectAll("rect")
+                .data(bins)
+                .join("rect")
+                .attr("x", b => x(b.x0) + 1)
+                .attr("width", b => Math.max(0, x(b.x1) - x(b.x0) - 1))
+                .attr("y", (b, i) => y(counts[i]))
+                .attr("height", (b, i) => y(0) - y(counts[i]))
+                .attr("fill", SEL_COLOR);
+
+            // Densité des sélectionnés, avec la même échelle que la densité globale
+            // (le même générateur `line`), donc directement comparable.
+            const vals = chosen.map(d => d[dim]);
+            const pts = pxs.map(px => [px, gaussianSum(vals, x.invert(px), sigma)]);
+            overlay.append("path")
+                .datum(pts)
+                .attr("fill", "none")
+                .attr("stroke", SEL_COLOR)
+                .attr("stroke-width", 2)
+                .attr("d", line);
+        };
+
+        view.clearBrush = () => { if (brushG) brushG.call(brush.move, null); };
+        views.push(view);
+
         select.on("input", draw);
         binsInput.on("input", draw);
         sigmaInput.on("input", draw);
@@ -283,12 +421,14 @@
         return root.node();
     }
 
+	// =====================================================================
+	// Coordonnées parallèles
+	// =====================================================================
     function parallelCoordinates(data) {
         const margin = { top: 120, right: 40, bottom: 20, left: 40 };
-        const width  = 1600 - margin.left - margin.right;   // large : 19 axes
+        const width  = 1600 - margin.left - margin.right;
         const height = 500  - margin.top  - margin.bottom;
 
-        // viewBox + 100% : le graphique est réduit pour tenir dans son panneau.
         const svg = d3.create("svg")
             .attr("viewBox", [0, 0, width + margin.left + margin.right, height + margin.top + margin.bottom])
             .attr("width", "100%")
@@ -297,10 +437,19 @@
         const g = svg.append("g")
             .attr("transform", `translate(${margin.left},${margin.top})`);
 
-        // 1. Toutes les colonnes numériques sont des dimensions
-        const dimensions = Object.keys(data[0]).filter(c => typeof data[0][c] === "number");
+        const view = {};
 
-        // 2. Une échelle linéaire par dimension (domaine = min/max de la colonne)
+        // Fond invisible : un clic dans le vide efface la sélection
+        g.append("rect")
+            .attr("x", -margin.left).attr("y", -margin.top)
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+            .attr("fill", "none")
+            .style("pointer-events", "all")
+            .on("click", () => setSelection([], null));
+
+        const dimensions = NUM_COLUMNS;
+
         const y = {};
         for (const dim of dimensions) {
             y[dim] = d3.scaleLinear()
@@ -308,29 +457,26 @@
                 .range([height, 0]);
         }
 
-        // 3. Position horizontale des axes
         const x = d3.scalePoint().domain(dimensions).range([0, width]);
 
-        // 4. Couleur selon une dimension (modifie ici pour en choisir une autre)
         const dimCouleur = "radius_mean";
         const color = d3.scaleSequential(d3.interpolateViridis)
             .domain(d3.extent(data, d => d[dimCouleur]));
 
-        // 5. Un objet -> une polyligne
         const path = d => d3.line()(dimensions.map(dim => [x(dim), y[dim](d[dim])]));
 
-        // 6. Lignes
         const lignes = g.append("g").attr("class", "lignes")
             .selectAll("path")
             .data(data)
             .join("path")
+            .attr("class", "ligne")
             .attr("d", path)
             .attr("fill", "none")
             .attr("stroke", d => color(d[dimCouleur]))
             .attr("stroke-width", 1)
-            .attr("opacity", 0.5);
+            .attr("opacity", 0.5)
+            .on("click", (event, d) => setSelection([d.id], null));
 
-        // 7. Axes + titres (inclinés pour que 19 noms tiennent)
         const axes = g.selectAll(".axe")
             .data(dimensions)
             .join("g")
@@ -347,47 +493,66 @@
             .attr("fill", "currentColor")
             .text(dim => dim);
 
-        // 8. Brushing : sélectionner une plage sur un ou plusieurs axes
+        // Brushing : un brush par axe, les plages se cumulent (ET logique)
         const selections = new Map();   // dimension -> [min, max] en valeurs de données
+        const brushes = new Map();      // dimension -> son d3.brushY
 
-        axes.append("g").each(function (dim) {
-            d3.select(this).call(
-                d3.brushY()
-                    .extent([[-10, 0], [10, height]])
-                    .on("brush end", ({ selection }) => {
-                        if (selection) {
-                            // pixels -> valeurs (y est inversé, donc on inverse l'ordre)
-                            const [haut, bas] = selection;
-                            selections.set(dim, [y[dim].invert(bas), y[dim].invert(haut)]);
-                        } else {
-                            selections.delete(dim);
-                        }
-                        mettreAJourLignes();
-                    })
-            );
-        });
-
-        function mettreAJourLignes() {
-            lignes.attr("opacity", d => {
-                const actif = [...selections].every(([dim, [min, max]]) => d[dim] >= min && d[dim] <= max);
-                return actif ? 0.7 : 0.03;
-            });
+        function makeBrush(dim) {
+            return d3.brushY()
+                .extent([[-10, 0], [10, height]])
+                .on("brush end", ({ selection, sourceEvent }) => {
+                    if (!sourceEvent) return;   // déclenché par clearBrush(), on ignore
+                    if (selection) {
+                        const [haut, bas] = selection;
+                        selections.set(dim, [y[dim].invert(bas), y[dim].invert(haut)]);
+                    } else {
+                        selections.delete(dim);
+                    }
+                    const ids = selections.size === 0 ? [] :
+                        data.filter(d => [...selections].every(([k, [min, max]]) => d[k] >= min && d[k] <= max))
+                            .map(d => d.id);
+                    setSelection(ids, view);
+                });
         }
+
+        const brushGs = axes.append("g").attr("class", "brush")
+            .each(function (dim) {
+                const b = makeBrush(dim);
+                brushes.set(dim, b);
+                d3.select(this).call(b);
+            });
+
+        view.update = sel => {
+            const has = sel.size > 0;
+            lignes
+                .attr("stroke", d => !has ? color(d[dimCouleur]) : sel.has(d.id) ? SEL_COLOR : "#bbb")
+                .attr("stroke-width", d => has && sel.has(d.id) ? 1.5 : 1)
+                .attr("opacity", d => !has ? 0.5 : sel.has(d.id) ? 0.9 : 0.08);
+            if (has) lignes.filter(d => sel.has(d.id)).raise();   // sélectionnés au premier plan
+        };
+
+        view.clearBrush = () => {
+            selections.clear();
+            brushGs.each(function (dim) {
+                d3.select(this).call(brushes.get(dim).move, null);
+            });
+        };
+        views.push(view);
 
         return svg.node();
     }
 
-    // Observable displays the returned node automatically; in plain HTML we add it to the page ourselves.
-    // Random sample: copy (slice) so the original data isn't reordered, shuffle, keep the first N.
-    // `data` is a const from data.js, so the sample goes in a new variable.
+	// =====================================================================
+	// Assemblage
+	// =====================================================================
+    // Échantillon aléatoire pour le scatter matrix. Ce sont les MÊMES objets que dans data
+    // (donc avec les mêmes d.id) : une sélection faite ailleurs s'y retrouve.
     const sampleSize = 300;
     const sample = d3.shuffle(data.slice()).slice(0, sampleSize);
     document.getElementById("scatter").appendChild(scatterMatrix(sample));
 
-    // The histogram uses all the data, not the sample.
     document.getElementById("histogram").appendChild(histogram(data));
 
-    // Parallel coordinates also use all the data.
     document.getElementById("parallel").appendChild(parallelCoordinates(data));
 </script>
 
