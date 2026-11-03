@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<title>Linked views</title>
+	<script src="data.js"></script>
+	<script src="d3.v7.min.js"></script>
+	<style>
+		body { font-family: sans-serif; margin: 16px; }
+		#charts { display: flex; flex-wrap: wrap; gap: 16px; }
+		.title { font-size: 13px; font-weight: bold; }
+		.dot { fill: #4c78a8; opacity: 0.6; cursor: pointer; }
+		.dot.dim { fill: #bbb; opacity: 0.3; }
+		.dot.selected { fill: #e4572e; opacity: 1; }
+		.bar-all { fill: #c8d1dc; }
+		.bar-all.has-selected { stroke: #e4572e; stroke-width: 1.5; }
+		.bar-sel { fill: #e4572e; }
+		#info { min-height: 1.4em; }
+	</style>
+</head>
+<body>
+<h2>Linked views</h2>
+<p>Drag a rectangle on any chart to select individuals. Click a point to select one individual. Click on an empty area to clear.</p>
+<p id="info">No selection</p>
+<div id="charts"></div>
+
+<script>
+	const W = 420, H = 300;
+	const M = { top: 25, right: 20, bottom: 40, left: 55 };
+	const iw = W - M.left - M.right, ih = H - M.top - M.bottom;
+
+	// 1. A stable id per individual, so every chart can talk about "the same" individual
+	data.forEach((d, i) => d.id = i);
+
+	// 2. Shared state + list of views to notify
+	let selected = new Set();
+	const views = [];
+
+	function setSelection(ids, source) {
+		selected = new Set(ids);
+		views.forEach(v => {
+			if (v !== source) v.clearBrush();   // only the chart being brushed keeps its rectangle
+			v.update(selected);
+		});
+		showInfo();
+	}
+
+	function showInfo() {
+		const info = d3.select("#info");
+		if (selected.size === 0) return info.text("No selection");
+		if (selected.size === 1) {
+			const d = data[[...selected][0]];
+			return info.text(`Individual #${d.id}: radius_mean=${d.radius_mean}, texture_mean=${d.texture_mean}, area_mean=${d.area_mean}`);
+		}
+		info.text(`${selected.size} individuals selected`);
+	}
+
+	// Margin convention + axes, shared by all charts
+	function makeChart(title, x, y, xLabel, yLabel) {
+		const svg = d3.select("#charts").append("svg").attr("width", W).attr("height", H);
+		svg.append("text").attr("class", "title").attr("x", M.left).attr("y", 15).text(title);
+		const g = svg.append("g").attr("transform", `translate(${M.left},${M.top})`);
+		g.append("g").attr("transform", `translate(0,${ih})`).call(d3.axisBottom(x).ticks(6));
+		g.append("g").call(d3.axisLeft(y).ticks(6));
+		g.append("text").attr("x", iw / 2).attr("y", ih + 34).attr("text-anchor", "middle")
+			.attr("font-size", 11).text(xLabel);
+		g.append("text").attr("transform", "rotate(-90)").attr("x", -ih / 2).attr("y", -42)
+			.attr("text-anchor", "middle").attr("font-size", 11).text(yLabel);
+		return g;
+	}
+
+	// ---------- Scatter plot ----------
+	function scatter(xKey, yKey) {
+		const x = d3.scaleLinear().domain(d3.extent(data, d => d[xKey])).nice().range([0, iw]);
+		const y = d3.scaleLinear().domain(d3.extent(data, d => d[yKey])).nice().range([ih, 0]);
+		const g = makeChart(`${yKey} vs ${xKey}`, x, y, xKey, yKey);
+		const view = {};
+
+		// Brush first, points after: points stay clickable on top of the brush overlay
+		const brush = d3.brush().extent([[0, 0], [iw, ih]])
+			.on("brush end", ({ selection, sourceEvent }) => {
+				if (!sourceEvent) return;                 // triggered by clearBrush(), ignore
+				if (!selection) return setSelection([], view);
+				const [[x0, y0], [x1, y1]] = selection;
+				const ids = data.filter(d => {
+					const px = x(d[xKey]), py = y(d[yKey]);
+					return x0 <= px && px <= x1 && y0 <= py && py <= y1;
+				}).map(d => d.id);
+				setSelection(ids, view);
+			});
+		const brushG = g.append("g").call(brush);
+
+		const dots = g.append("g").selectAll("circle").data(data).join("circle")
+			.attr("class", "dot")
+			.attr("cx", d => x(d[xKey]))
+			.attr("cy", d => y(d[yKey]))
+			.attr("r", 3)
+			.on("click", (event, d) => setSelection([d.id], null));
+		dots.append("title").text(d => `#${d.id}\n${xKey}: ${d[xKey]}\n${yKey}: ${d[yKey]}`);
+
+		view.update = sel => {
+			dots.classed("selected", d => sel.has(d.id))
+				.classed("dim", d => sel.size > 0 && !sel.has(d.id));
+			dots.filter(d => sel.has(d.id)).raise();   // draw selected points on top
+		};
+		view.clearBrush = () => brushG.call(brush.move, null);
+		views.push(view);
+	}
+
+	// ---------- Histogram ----------
+	function histogram(key) {
+		const x = d3.scaleLinear().domain(d3.extent(data, d => d[key])).nice().range([0, iw]);
+		const bins = d3.bin().value(d => d[key]).domain(x.domain()).thresholds(x.ticks(20))(data);
+		const y = d3.scaleLinear().domain([0, d3.max(bins, b => b.length)]).nice().range([ih, 0]);
+		const g = makeChart(`Histogram of ${key}`, x, y, key, "count");
+		const view = {};
+
+		const barX = b => x(b.x0) + 1;
+		const barW = b => Math.max(0, x(b.x1) - x(b.x0) - 1);
+
+		// Layer 1: all individuals (grey)
+		const allBars = g.append("g").selectAll("rect").data(bins).join("rect")
+			.attr("class", "bar-all")
+			.attr("x", barX).attr("width", barW)
+			.attr("y", b => y(b.length)).attr("height", b => ih - y(b.length));
+
+		// Layer 2: only the selected individuals in each bin (colored)
+		const selBars = g.append("g").selectAll("rect").data(bins).join("rect")
+			.attr("class", "bar-sel")
+			.attr("x", barX).attr("width", barW)
+			.attr("y", ih).attr("height", 0);
+
+		// 1D brush on top of the bars
+		const brush = d3.brushX().extent([[0, 0], [iw, ih]])
+			.on("brush end", ({ selection, sourceEvent }) => {
+				if (!sourceEvent) return;
+				if (!selection) return setSelection([], view);
+				const [v0, v1] = selection.map(x.invert);   // pixels -> data values
+				setSelection(data.filter(d => v0 <= d[key] && d[key] <= v1).map(d => d.id), view);
+			});
+		const brushG = g.append("g").call(brush);
+
+		view.update = sel => {
+			const nSel = b => b.filter(d => sel.has(d.id)).length;
+			selBars.attr("y", b => y(nSel(b))).attr("height", b => ih - y(nSel(b)));
+			allBars.classed("has-selected", b => nSel(b) > 0);   // outline bins containing a selected individual
+		};
+		view.clearBrush = () => brushG.call(brush.move, null);
+		views.push(view);
+	}
+
+	scatter("radius_mean", "texture_mean");
+	histogram("area_mean");
+	histogram("texture_mean");
+	histogram("concavity_mean");
+</script>
+</body>
+</html>
